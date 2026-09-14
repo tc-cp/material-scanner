@@ -495,7 +495,7 @@
     // ═══════════════════════════════════════════════════════════
     // ⚠️ QUAN TRỌNG: Thay URL này bằng URL deploy GAS của bạn
     // ═══════════════════════════════════════════════════════════
-    const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
+    const GAS_WEB_APP_URL = 'https://script.google.com/a/macros/colpal.com/s/AKfycbytUmkdVC7yC2GOsRApLm0rIYPx6icpQ9G92837oBIbcyEv2UuwDRVZVseCXHR25X44/exec';
     // ═══════════════════════════════════════════════════════════
 
     // ===================== STATE =====================
