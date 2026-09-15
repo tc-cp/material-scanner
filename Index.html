@@ -559,7 +559,9 @@
       maxBarcodes: 2,
       availableCameras: [],
       currentCameraIndex: 0,
-      torchOn: false
+      torchOn: false,
+      lastScanTime: 0,          // Timestamp of last successful scan
+      scanCooldownMs: 1500      // 1.5s cooldown to prevent duplicate reads
     };
 
     // ===================== GS1 RAW DATA NORMALIZER =====================
@@ -813,12 +815,13 @@
         // - disableFlip: true (rear camera doesn't need mirror)
         // ============================================================
         const scanConfig = {
-          fps: 15,
+          fps: 20,                    // High FPS for faster detection of long barcodes
           qrbox: function(viewfinderWidth, viewfinderHeight) {
-            // Wide + short scan region: optimal for long 1D barcodes (GS1-128)
+            // VERY WIDE + SHORT: optimized for long GS1-128 barcodes like
+            // (10)6255VN1101(240)P11242642 which are physically long
             return {
-              width: Math.min(Math.floor(viewfinderWidth * 0.9), 600),
-              height: Math.max(Math.min(Math.floor(viewfinderHeight * 0.3), 160), 60)
+              width: Math.min(Math.floor(viewfinderWidth * 0.95), 700),
+              height: Math.max(Math.min(Math.floor(viewfinderHeight * 0.2), 120), 50)
             };
           },
           aspectRatio: 1.7778,
@@ -873,20 +876,58 @@
       }
     }
 
+    /**
+     * Strip invisible characters, whitespace, and normalize for comparison.
+     * Prevents duplicates caused by slight decode variations.
+     */
+    function cleanForCompare(text) {
+      return text
+        .replace(/[\x00-\x1F\x7F]/g, '')  // Remove control characters (GS, RS, etc.)
+        .replace(/\s+/g, '')               // Remove all whitespace
+        .trim()
+        .toLowerCase();
+    }
+
+    /**
+     * Check if a new barcode is a duplicate of any already-scanned barcode.
+     * Uses fuzzy matching: exact match, cleaned match, or substring containment.
+     */
+    function isDuplicate(newText, existingBarcodes) {
+      var cleanNew = cleanForCompare(newText);
+      for (var i = 0; i < existingBarcodes.length; i++) {
+        var cleanExisting = cleanForCompare(existingBarcodes[i]);
+        // Exact match after normalization
+        if (cleanNew === cleanExisting) return true;
+        // Substring containment (one contains the other)
+        if (cleanNew.length > 5 && cleanExisting.length > 5) {
+          if (cleanNew.indexOf(cleanExisting) !== -1 || cleanExisting.indexOf(cleanNew) !== -1) return true;
+        }
+      }
+      return false;
+    }
+
     function onScanSuccess(decodedText, decodedResult) {
       // ============================================================
-      // FIX #4: Normalize raw GS1 data before storing/displaying
-      //
-      // Raw barcode data: "106255VN1101\x1D240P11242642"
-      // Normalized:       "(10)6255VN1101(240)P11242642"
+      // ANTI-DUPLICATE: Cooldown timer prevents same barcode being
+      // read twice in quick succession (common with high FPS scanning)
       // ============================================================
+      var now = Date.now();
+      if (now - scannerState.lastScanTime < scannerState.scanCooldownMs) {
+        return; // Too soon after last scan, ignore
+      }
+
+      // Normalize raw GS1 data if applicable
       const normalizedText = normalizeGS1Barcode(decodedText);
 
-      // Skip duplicates (check both raw and normalized forms)
-      if (scannerState.scannedBarcodes.includes(normalizedText) ||
-          scannerState.scannedBarcodes.includes(decodedText)) return;
+      // Fuzzy duplicate check (handles whitespace, invisible chars, substrings)
+      if (isDuplicate(normalizedText, scannerState.scannedBarcodes) ||
+          isDuplicate(decodedText, scannerState.scannedBarcodes)) {
+        return;
+      }
 
+      // Accept this barcode
       scannerState.scannedBarcodes.push(normalizedText);
+      scannerState.lastScanTime = now;
       if (navigator.vibrate) navigator.vibrate(100);
       playBeep();
 
@@ -1201,4 +1242,3 @@
   </script>
 </body>
 </html>
-
