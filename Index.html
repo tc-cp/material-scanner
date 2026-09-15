@@ -9,11 +9,7 @@
   <!-- Html5-QRCode Library (fallback decoder) -->
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 
-  <!-- ZBar WASM - WebAssembly barcode decoder (primary, much faster/better for GS1-128) -->
-  <script type="module">
-    import { scanImageData } from 'https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.11.0/dist/index.js';
-    window.zbarScanImageData = scanImageData;
-  </script>
+  <!-- ZBar WASM loaded dynamically at scan time via import() -->
   
   <!-- Google Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -568,16 +564,43 @@
       torchOn: false,
       lastScanTime: 0,
       scanCooldownMs: 1500,
+      activeEngine: null,           // 'zbar' | 'native' | 'fallback' — tracks which engine is running
       // Native/ZBar engine state
       videoStream: null,
       videoElement: null,
       nativeDetector: null,
       detectInterval: null,
       // ZBar WASM engine state
-      scanCanvas: null,             // Offscreen canvas for frame capture
-      scanCtx: null,                // Canvas 2D context
-      animFrameId: null             // requestAnimationFrame ID
+      scanCanvas: null,
+      scanCtx: null,
+      animFrameId: null
     };
+
+    // ===================== ZBAR WASM LAZY LOADER =====================
+    // ZBar is loaded via dynamic import() the FIRST time user clicks Scan.
+    // This avoids the timing bug where <script type="module"> loads async
+    // but the check ran in a regular script (always evaluated to false).
+    let _zbarLoaded = false;
+    let _zbarLoadAttempted = false;
+
+    async function ensureZbarLoaded() {
+      if (_zbarLoaded) return true;
+      if (_zbarLoadAttempted) return false; // Already tried and failed
+      _zbarLoadAttempted = true;
+
+      try {
+        console.log('⏳ Loading ZBar WASM from CDN...');
+        const zbarModule = await import('https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.11.0/dist/index.js');
+        window.zbarScanImageData = zbarModule.scanImageData;
+        _zbarLoaded = true;
+        console.log('✅ ZBar WASM loaded successfully!');
+        return true;
+      } catch (err) {
+        console.warn('⚠️ ZBar WASM failed to load:', err);
+        console.warn('Falling back to alternative decoder...');
+        return false;
+      }
+    }
 
     // ===================== GS1 RAW DATA NORMALIZER =====================
 
@@ -637,11 +660,23 @@
       // GS1-128 indicators:
       //   1. ]C1 symbology identifier prefix
       //   2. GS separator character (ASCII 29 / \x1D)
+      //   3. Starts with a well-known fixed-length AI code (00, 01, 02)
+      //      followed by the correct number of digits
+      //   4. Starts with AI 10 followed by alphanumeric batch data
+      //      (heuristic for ZBar which may strip FNC1)
       // ============================================================
       var hasSymbologyId = /^\]C1/i.test(barcode);
       var hasGsSeparator = barcode.indexOf('\x1D') !== -1 || barcode.indexOf('\x1E') !== -1;
+      
+      // Heuristic: ZBar often strips FNC1/GS chars, leaving raw concatenated data.
+      // Detect if string starts with a known AI pattern:
+      //   "00" + 18 digits = SSCC
+      //   "01" + 14 digits = GTIN  
+      //   "02" + 14 digits = GTIN of contained items
+      //   "10" + alphanumeric = Batch (very common on user's labels)
+      var startsWithKnownAI = /^(00\d{18}|01\d{14}|02\d{14}|10[A-Za-z0-9])/.test(barcode);
 
-      if (!hasSymbologyId && !hasGsSeparator) {
+      if (!hasSymbologyId && !hasGsSeparator && !startsWithKnownAI) {
         // Not GS1 data — return as-is without any AI parsing
         return barcode;
       }
@@ -741,20 +776,15 @@
     //   1. ZBar WASM — WebAssembly decoder, best at reading Code 128/GS1-128
     //   2. Native BarcodeDetector API — GPU-accelerated, good fallback
     //   3. html5-qrcode library — last resort for Safari/Firefox
+    //
+    // ZBar is loaded LAZILY via dynamic import() when user clicks Scan.
+    // Engine selection happens at scan time, not at page load.
+    // Active engine is tracked via scannerState.activeEngine.
     // ==========================================================
-
-    const hasZbarWasm = (typeof window.zbarScanImageData === 'function');
-    const hasNativeBarcodeDetector = ('BarcodeDetector' in window);
 
     function initScanner() {
       document.getElementById('scanner-container').style.minHeight = '250px';
-      if (hasZbarWasm) {
-        console.log('✅ ZBar WASM available — using WebAssembly decoder (best for GS1-128)');
-      } else if (hasNativeBarcodeDetector) {
-        console.log('⚠️ ZBar not loaded, using native BarcodeDetector API');
-      } else {
-        console.log('⚠️ Falling back to html5-qrcode');
-      }
+      console.log('Scanner initialized. ZBar WASM will load on first scan.');
     }
 
     function getErrorMessage(err) {
@@ -1071,23 +1101,42 @@
         return;
       }
 
-      // Priority: ZBar WASM > Native BarcodeDetector > html5-qrcode
-      if (hasZbarWasm) {
+      // ============================================================
+      // Engine selection at SCAN TIME (not page load!)
+      // ZBar is loaded lazily via dynamic import() on first scan.
+      // ============================================================
+      showToast('⏳ Đang khởi tạo scanner...', 'info');
+
+      const zbarAvailable = await ensureZbarLoaded();
+
+      if (zbarAvailable) {
+        console.log('🟢 Using ZBar WASM engine');
+        scannerState.activeEngine = 'zbar';
         await startScanZbar();
-      } else if (hasNativeBarcodeDetector) {
+      } else if ('BarcodeDetector' in window) {
+        console.log('🟡 Using native BarcodeDetector engine');
+        scannerState.activeEngine = 'native';
         await startScanNative();
       } else {
+        console.log('🟠 Using html5-qrcode fallback engine');
+        scannerState.activeEngine = 'fallback';
         await startScanFallback();
       }
     }
 
     function stopScan() {
-      if (hasZbarWasm) {
-        stopScanZbar();
-      } else if (hasNativeBarcodeDetector) {
-        stopScanNative();
-      } else {
-        stopScanFallback();
+      const engine = scannerState.activeEngine;
+      scannerState.activeEngine = null;
+
+      switch (engine) {
+        case 'zbar':    stopScanZbar();     break;
+        case 'native':  stopScanNative();   break;
+        case 'fallback': stopScanFallback(); break;
+        default:
+          // Safety: try to stop all engines
+          stopScanZbar();
+          stopScanNative();
+          stopScanFallback();
       }
     }
 
