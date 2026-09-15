@@ -612,8 +612,25 @@
       // Already has parenthesized AIs -> return as-is
       if (/\(\d{2,4}\)/.test(barcode)) return barcode;
 
+      // ============================================================
+      // IMPORTANT: Only attempt GS1 parsing if there are CLEAR indicators
+      // that this is GS1-128 data. Without these, raw digit sequences
+      // can be falsely matched as AI codes (e.g. "11..." → AI 11).
+      //
+      // GS1-128 indicators:
+      //   1. ]C1 symbology identifier prefix
+      //   2. GS separator character (ASCII 29 / \x1D)
+      // ============================================================
+      var hasSymbologyId = /^\]C1/i.test(barcode);
+      var hasGsSeparator = barcode.indexOf('\x1D') !== -1 || barcode.indexOf('\x1E') !== -1;
+
+      if (!hasSymbologyId && !hasGsSeparator) {
+        // Not GS1 data — return as-is without any AI parsing
+        return barcode;
+      }
+
       // Strip GS1 symbology identifier prefix (Code 128 = "]C1")
-      var data = barcode.replace(/^\]C1/, '').replace(/^\]c1/, '');
+      var data = barcode.replace(/^\]C1/i, '');
 
       // Split on GS (Group Separator, ASCII 29) or RS (Record Separator, ASCII 30)
       var segments = data.split(/[\x1D\x1E]/).filter(function(s) { return s.length > 0; });
