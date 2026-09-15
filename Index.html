@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>📱 Barcode & QR Scanner</title>
+  <meta name="description" content="Scan Barcode và QR Code bằng camera, lưu tự động vào Google Sheets">
+  
+  <!-- Html5-QRCode Library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+
+  <style>
+    /* ====== CSS VARIABLES ====== */
+    :root {
+      --primary: #2563eb;
+      --primary-light: #3b82f6;
+      --primary-dark: #1d4ed8;
+      --primary-glow: rgba(37, 99, 235, 0.25);
+      --success: #10b981;
+      --success-light: #34d399;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --bg-dark: #0f172a;
+      --bg-card: #1e293b;
+      --bg-card-hover: #273548;
+      --bg-input: #334155;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --border: #334155;
+      --border-focus: #2563eb;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+      --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+      --shadow-lg: 0 8px 32px rgba(0,0,0,0.5);
+      --shadow-glow: 0 0 20px var(--primary-glow);
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      top: -50%; left: -50%;
+      width: 200%; height: 200%;
+      background: radial-gradient(ellipse at 30% 20%, rgba(37,99,235,0.08) 0%, transparent 50%),
+                  radial-gradient(ellipse at 70% 80%, rgba(16,185,129,0.05) 0%, transparent 50%);
+      animation: bgFloat 20s ease-in-out infinite;
+      pointer-events: none; z-index: 0;
+    }
+    @keyframes bgFloat {
+      0%, 100% { transform: translate(0,0) rotate(0deg); }
+      50% { transform: translate(-1%,1%) rotate(-0.5deg); }
+    }
+
+    .app-container {
+      position: relative; z-index: 1;
+      max-width: 480px; margin: 0 auto;
+      padding: 16px; min-height: 100vh;
+    }
+
+    /* ====== HEADER ====== */
+    .app-header { text-align: center; padding: 20px 0 16px; }
+    .app-title {
+      font-size: 1.5rem; font-weight: 800;
+      background: linear-gradient(135deg, #60a5fa, #a78bfa, #34d399);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text; letter-spacing: -0.5px;
+    }
+    .app-subtitle { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+
+    /* ====== STATS BAR ====== */
+    .stats-bar { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; margin-bottom: 16px; }
+    .stat-item {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 12px 8px;
+      text-align: center; transition: var(--transition);
+    }
+    .stat-item:hover { border-color: var(--primary); box-shadow: var(--shadow-glow); }
+    .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--primary-light); }
+    .stat-label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+    /* ====== SCANNER SECTION ====== */
+    .scanner-section {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); overflow: hidden;
+      margin-bottom: 16px; box-shadow: var(--shadow-md);
+    }
+    .scanner-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; border-bottom: 1px solid var(--border);
+    }
+    .scanner-header-left { display: flex; align-items: center; gap: 8px; }
+    .scanner-header-left .material-icons-round { color: var(--primary-light); font-size: 20px; }
+    .scanner-header-title { font-size: 0.9rem; font-weight: 600; }
+
+    .scan-mode-toggle { display: flex; background: var(--bg-input); border-radius: var(--radius-sm); padding: 2px; }
+    .mode-btn {
+      padding: 6px 12px; font-size: 0.7rem; font-weight: 500;
+      border: none; border-radius: 6px; cursor: pointer;
+      transition: var(--transition); background: transparent;
+      color: var(--text-muted); font-family: inherit;
+    }
+    .mode-btn.active { background: var(--primary); color: white; box-shadow: var(--shadow-sm); }
+
+    /* Camera viewport */
+    .camera-viewport {
+      position: relative; width: 100%;
+      min-height: 300px; background: #000; overflow: hidden;
+    }
+    #scanner-container { width: 100%; height: 100%; }
+    #scanner-container video { width: 100% !important; height: auto !important; object-fit: cover !important; }
+
+    .scan-overlay {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none; z-index: 10;
+    }
+    .scan-frame {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%,-50%);
+      width: 85%; height: 55%;
+      border: 2px solid rgba(37,99,235,0.5); border-radius: 12px;
+    }
+    .scan-frame::before, .scan-frame::after {
+      content: ''; position: absolute; width: 24px; height: 24px;
+      border-color: var(--primary-light); border-style: solid;
+    }
+    .scan-frame::before { top: -2px; left: -2px; border-width: 3px 0 0 3px; border-radius: 12px 0 0 0; }
+    .scan-frame::after { top: -2px; right: -2px; border-width: 3px 3px 0 0; border-radius: 0 12px 0 0; }
+    .scan-corner-bl, .scan-corner-br {
+      position: absolute; width: 24px; height: 24px;
+      border-color: var(--primary-light); border-style: solid;
+    }
+    .scan-corner-bl { bottom: -2px; left: -2px; border-width: 0 0 3px 3px; border-radius: 0 0 0 12px; }
+    .scan-corner-br { bottom: -2px; right: -2px; border-width: 0 3px 3px 0; border-radius: 0 0 12px 0; }
+
+    .scan-line {
+      position: absolute; left: 10%; right: 10%; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--primary-light), var(--success-light), var(--primary-light), transparent);
+      box-shadow: 0 0 8px var(--primary-glow);
+      animation: scanPulse 2s ease-in-out infinite;
+    }
+    .scan-line-1 { top: 38%; }
+    .scan-line-2 { top: 58%; animation-delay: 0.5s; }
+    .scan-line-label {
+      position: absolute; right: 12%; font-size: 0.55rem; color: var(--primary-light);
+      background: rgba(15,23,42,0.7); padding: 1px 6px; border-radius: 4px;
+      letter-spacing: 0.5px; font-weight: 600;
+    }
+    .scan-line-label-1 { top: 34%; }
+    .scan-line-label-2 { top: 54%; }
+    @keyframes scanPulse {
+      0%, 100% { opacity: 0.4; transform: scaleX(0.95); }
+      50% { opacity: 1; transform: scaleX(1); }
+    }
+
+    /* ====== CONTROLS ====== */
+    .scanner-controls {
+      display: flex; gap: 8px; padding: 12px 16px;
+      border-top: 1px solid var(--border);
+    }
+    .btn {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 10px 16px; border: none; border-radius: var(--radius-sm);
+      font-family: inherit; font-size: 0.8rem; font-weight: 600;
+      cursor: pointer; transition: var(--transition); flex: 1;
+    }
+    .btn .material-icons-round { font-size: 18px; }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      color: white; box-shadow: var(--shadow-sm);
+    }
+    .btn-primary:hover { box-shadow: var(--shadow-glow); transform: translateY(-1px); }
+    .btn-primary.scanning {
+      background: linear-gradient(135deg, var(--danger), #dc2626);
+      animation: pulseBtn 1.5s ease-in-out infinite;
+    }
+    @keyframes pulseBtn {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+      50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+    }
+    .btn-secondary {
+      background: var(--bg-input); color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+    .btn-success { background: linear-gradient(135deg, var(--success), #059669); color: white; }
+    .btn-success:hover { box-shadow: 0 0 20px rgba(16,185,129,0.3); transform: translateY(-1px); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
+
+    /* ====== RESULTS ====== */
+    .scan-results {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 16px; margin-bottom: 16px;
+    }
+    .results-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .results-header .material-icons-round { color: var(--success); font-size: 20px; }
+    .results-title { font-size: 0.9rem; font-weight: 600; }
+    .results-badge {
+      margin-left: auto; background: rgba(16,185,129,0.15);
+      color: var(--success); padding: 2px 10px; border-radius: 20px;
+      font-size: 0.7rem; font-weight: 600;
+    }
+
+    .barcode-result {
+      background: var(--bg-input); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 12px;
+      margin-bottom: 8px; transition: var(--transition);
+    }
+    .barcode-result:hover { border-color: var(--primary); }
+    .barcode-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.7rem; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+    }
+    .barcode-label .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary-light); }
+    .barcode-value {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 0.95rem; font-weight: 600; color: var(--text-primary);
+      word-break: break-all; line-height: 1.4;
+    }
+    .barcode-input {
+      width: 100%; background: var(--bg-dark); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 12px;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;
+      color: var(--text-primary); outline: none; transition: var(--transition);
+    }
+    .barcode-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+    .barcode-input::placeholder { color: var(--text-muted); font-family: 'Inter', sans-serif; }
+
+    .gs1-data {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+    }
+    .gs1-item { background: var(--bg-dark); border-radius: 6px; padding: 8px 10px; }
+    .gs1-key { font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .gs1-val { font-size: 0.85rem; font-weight: 600; color: var(--success-light); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+
+    .note-section { margin-top: 12px; }
+    .note-input {
+      width: 100%; background: var(--bg-dark); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 12px; font-family: 'Inter', sans-serif;
+      font-size: 0.8rem; color: var(--text-primary); outline: none;
+      transition: var(--transition); resize: none; min-height: 36px;
+    }
+    .note-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+    .save-section { margin-top: 12px; }
+
+    /* ====== HISTORY ====== */
+    .history-section {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); overflow: hidden; margin-bottom: 16px;
+    }
+    .history-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; border-bottom: 1px solid var(--border);
+    }
+    .history-header-left { display: flex; align-items: center; gap: 8px; }
+    .history-header .material-icons-round { color: var(--warning); font-size: 20px; }
+    .history-list { max-height: 300px; overflow-y: auto; }
+    .history-list::-webkit-scrollbar { width: 4px; }
+    .history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .history-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+      transition: var(--transition); cursor: pointer;
+    }
+    .history-item:hover { background: var(--bg-card-hover); }
+    .history-item:last-child { border-bottom: none; }
+    .history-num {
+      width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+      background: var(--bg-input); border-radius: 6px; font-size: 0.7rem; font-weight: 700;
+      color: var(--text-muted); flex-shrink: 0;
+    }
+    .history-content { flex: 1; min-width: 0; }
+    .history-barcode {
+      font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+      color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .history-time { font-size: 0.65rem; color: var(--text-muted); margin-top: 2px; }
+    .history-status { font-size: 0.7rem; flex-shrink: 0; }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted); }
+    .empty-state .material-icons-round { font-size: 48px; margin-bottom: 12px; opacity: 0.3; }
+    .empty-state p { font-size: 0.85rem; }
+
+    /* ====== TOAST ====== */
+    .toast {
+      position: fixed; bottom: 20px; left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 12px 20px;
+      display: flex; align-items: center; gap: 10px;
+      box-shadow: var(--shadow-lg); z-index: 1000;
+      transition: transform 0.4s cubic-bezier(0.4,0,0.2,1); max-width: 90%;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); }
+    .toast.success { border-color: var(--success); }
+    .toast.error { border-color: var(--danger); }
+    .toast.info { border-color: var(--primary); }
+    .toast-icon { font-size: 20px; }
+    .toast.success .toast-icon { color: var(--success); }
+    .toast.error .toast-icon { color: var(--danger); }
+    .toast.info .toast-icon { color: var(--primary); }
+    .toast-msg { font-size: 0.8rem; font-weight: 500; }
+
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.3); border-top-color: white;
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .scan-flash { animation: flashGreen 0.5s ease-out; }
+    @keyframes flashGreen {
+      0% { box-shadow: inset 0 0 0 3px rgba(16,185,129,0.8); }
+      100% { box-shadow: inset 0 0 0 0 rgba(16,185,129,0); }
+    }
+
+    .manual-section { padding: 16px; }
+    .manual-section .barcode-result { margin-bottom: 10px; }
+
+    /* Setup banner */
+    .setup-banner {
+      background: linear-gradient(135deg, #f59e0b22, #ef444422);
+      border: 1px solid var(--warning);
+      border-radius: var(--radius-md);
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 0.8rem;
+      color: var(--warning);
+      display: none;
+    }
+    .setup-banner a { color: var(--primary-light); }
+
+    @media (max-width: 400px) {
+      .app-container { padding: 12px; }
+      .scan-mode-toggle { display: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <h1 class="app-title">📷 Barcode & QR Scanner</h1>
+      <p class="app-subtitle">Hỗ trợ scan 2 dòng barcode cùng lúc • GS1-128 / QR / Code128</p>
+    </header>
+
+    <!-- Setup Warning -->
+    <div class="setup-banner" id="setup-banner">
+      ⚠️ Chưa cấu hình URL backend. Vui lòng cập nhật <code>GAS_WEB_APP_URL</code> trong code.
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-value" id="stat-total">0</div>
+        <div class="stat-label">Tổng scan</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="stat-today">0</div>
+        <div class="stat-label">Hôm nay</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="stat-week">0</div>
+        <div class="stat-label">Tuần này</div>
+      </div>
+    </div>
+
+    <!-- Scanner -->
+    <div class="scanner-section">
+      <div class="scanner-header">
+        <div class="scanner-header-left">
+          <span class="material-icons-round">qr_code_scanner</span>
+          <span class="scanner-header-title">Scanner</span>
+        </div>
+        <div class="scan-mode-toggle">
+          <button class="mode-btn active" onclick="switchMode('camera')" id="mode-camera">Camera</button>
+          <button class="mode-btn" onclick="switchMode('manual')" id="mode-manual">Nhập tay</button>
+        </div>
+      </div>
+
+      <div id="camera-mode">
+        <div class="camera-viewport">
+          <div id="scanner-container"></div>
+          <div class="scan-overlay" id="scan-overlay" style="display:none;">
+            <div class="scan-frame">
+              <div class="scan-corner-bl"></div>
+              <div class="scan-corner-br"></div>
+            </div>
+            <div class="scan-line scan-line-1"></div>
+            <div class="scan-line scan-line-2"></div>
+            <span class="scan-line-label scan-line-label-1">LINE 1</span>
+            <span class="scan-line-label scan-line-label-2">LINE 2</span>
+          </div>
+        </div>
+        <div class="scanner-controls">
+          <button class="btn btn-primary" id="btn-scan" onclick="toggleScan()">
+            <span class="material-icons-round">play_arrow</span>
+            <span id="btn-scan-text">Bắt đầu Scan</span>
+          </button>
+          <button class="btn btn-secondary" onclick="switchCamera()" id="btn-switch-cam">
+            <span class="material-icons-round">flip_camera_ios</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="manual-mode" style="display:none;">
+        <div class="manual-section">
+          <div class="barcode-result">
+            <div class="barcode-label"><span class="dot"></span> Barcode dòng 1</div>
+            <input type="text" class="barcode-input" id="manual-barcode1" placeholder="Nhập hoặc quét barcode dòng 1...">
+          </div>
+          <div class="barcode-result">
+            <div class="barcode-label"><span class="dot" style="background:var(--success);"></span> Barcode dòng 2</div>
+            <input type="text" class="barcode-input" id="manual-barcode2" placeholder="Nhập hoặc quét barcode dòng 2...">
+          </div>
+          <div style="margin-top:12px;">
+            <button class="btn btn-success" onclick="processManualInput()" style="width:100%;">
+              <span class="material-icons-round">check_circle</span> Xử lý & Lưu
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div class="scan-results" id="results-section" style="display:none;">
+      <div class="results-header">
+        <span class="material-icons-round">verified</span>
+        <span class="results-title">Kết quả Scan</span>
+        <span class="results-badge" id="results-count">2 mã</span>
+      </div>
+      <div id="results-container"></div>
+      <div class="gs1-data" id="gs1-container" style="display:none;">
+        <div class="gs1-item"><div class="gs1-key">Batch (AI:10)</div><div class="gs1-val" id="gs1-batch">-</div></div>
+        <div class="gs1-item"><div class="gs1-key">Material (AI:240)</div><div class="gs1-val" id="gs1-material">-</div></div>
+        <div class="gs1-item"><div class="gs1-key">SSCC (AI:00)</div><div class="gs1-val" id="gs1-sscc">-</div></div>
+        <div class="gs1-item"><div class="gs1-key">GTIN (AI:01)</div><div class="gs1-val" id="gs1-gtin">-</div></div>
+      </div>
+      <div class="note-section">
+        <input type="text" class="note-input" id="scan-note" placeholder="Thêm ghi chú (tùy chọn)...">
+      </div>
+      <div class="save-section">
+        <button class="btn btn-success" onclick="saveResults()" id="btn-save" style="width:100%;">
+          <span class="material-icons-round">save</span> Lưu vào Google Sheets
+        </button>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="history-section">
+      <div class="history-header">
+        <div class="history-header-left">
+          <span class="material-icons-round">history</span>
+          <span class="scanner-header-title">Lịch sử scan</span>
+        </div>
+        <button class="btn btn-secondary" onclick="refreshHistory()" style="flex:0;padding:6px 12px;">
+          <span class="material-icons-round" style="font-size:16px;">refresh</span>
+        </button>
+      </div>
+      <div class="history-list" id="history-list">
+        <div class="empty-state">
+          <span class="material-icons-round">inbox</span>
+          <p>Chưa có lịch sử scan</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast">
+    <span class="material-icons-round toast-icon" id="toast-icon">check_circle</span>
+    <span class="toast-msg" id="toast-msg">Thành công!</span>
+  </div>
+
+  <script>
+    // ═══════════════════════════════════════════════════════════
+    // ⚠️ QUAN TRỌNG: Thay URL này bằng URL deploy GAS của bạn
+    // ═══════════════════════════════════════════════════════════
+    const GAS_WEB_APP_URL = 'https://script.google.com/a/macros/colpal.com/s/AKfycbytUmkdVC7yC2GOsRApLm0rIYPx6icpQ9G92837oBIbcyEv2UuwDRVZVseCXHR25X44/exec';
+    // ═══════════════════════════════════════════════════════════
+
+    // ===================== STATE =====================
+    const scannerState = {
+      isScanning: false,
+      scanner: null,
+      scannedBarcodes: [],
+      currentMode: 'camera',
+      useFrontCamera: false,
+      maxBarcodes: 2,
+      availableCameras: [],
+      currentCameraIndex: 0
+    };
+
+    // ===================== API HELPER =====================
+    
+    async function callGasApi(action, params) {
+      const url = new URL(GAS_WEB_APP_URL);
+      url.searchParams.set('action', action);
+      if (params) {
+        Object.keys(params).forEach(k => url.searchParams.set(k, params[k]));
+      }
+      
+      try {
+        const response = await fetch(url.toString(), { redirect: 'follow' });
+        return await response.json();
+      } catch (err) {
+        console.error('API GET error:', err);
+        return { success: false, error: err.message };
+      }
+    }
+
+    async function postGasApi(data) {
+      try {
+        const response = await fetch(GAS_WEB_APP_URL, {
+          method: 'POST',
+          redirect: 'follow',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(data)
+        });
+        return await response.json();
+      } catch (err) {
+        console.error('API POST error:', err);
+        return { success: false, error: err.message };
+      }
+    }
+
+    // ===================== SCANNER =====================
+    
+    function initScanner() {
+      document.getElementById('scanner-container').style.minHeight = '250px';
+    }
+
+    function getErrorMessage(err) {
+      if (typeof err === 'string') return err;
+      if (err && err.message) return err.message;
+      return 'Lỗi không xác định';
+    }
+
+    function toggleScan() {
+      if (scannerState.isScanning) { stopScan(); }
+      else { startScan(); }
+    }
+
+    async function startScan() {
+      const btnScan = document.getElementById('btn-scan');
+      const btnText = document.getElementById('btn-scan-text');
+      
+      scannerState.scannedBarcodes = [];
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showToast('Trình duyệt không hỗ trợ camera.', 'error');
+        return;
+      }
+
+      try {
+        // Enumerate cameras
+        let cameras = scannerState.availableCameras;
+        if (cameras.length === 0) {
+          cameras = await Html5Qrcode.getCameras();
+          scannerState.availableCameras = cameras;
+        }
+
+        if (!cameras || cameras.length === 0) {
+          showToast('Không tìm thấy camera nào.', 'error');
+          return;
+        }
+
+        // Select camera
+        let selectedCameraId;
+        if (scannerState.useFrontCamera) {
+          selectedCameraId = cameras[0].id;
+          scannerState.currentCameraIndex = 0;
+        } else {
+          const backCam = cameras.find(c => (c.label||'').toLowerCase().match(/back|rear|environment/));
+          if (backCam) {
+            selectedCameraId = backCam.id;
+            scannerState.currentCameraIndex = cameras.indexOf(backCam);
+          } else {
+            selectedCameraId = cameras[cameras.length - 1].id;
+            scannerState.currentCameraIndex = cameras.length - 1;
+          }
+        }
+
+        const config = {
+          fps: 10,
+          qrbox: { width: 280, height: 150 },
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.QR_CODE,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.ITF,
+            Html5QrcodeSupportedFormats.CODABAR,
+            Html5QrcodeSupportedFormats.DATA_MATRIX
+          ]
+        };
+
+        scannerState.scanner = new Html5Qrcode("scanner-container");
+        
+        await scannerState.scanner.start(
+          selectedCameraId,
+          config,
+          onScanSuccess,
+          onScanError
+        );
+
+        scannerState.isScanning = true;
+        btnScan.classList.add('scanning');
+        btnText.textContent = 'Đang scan... (Dừng)';
+        btnScan.querySelector('.material-icons-round').textContent = 'stop';
+        document.getElementById('scan-overlay').style.display = 'block';
+
+        const camLabel = cameras[scannerState.currentCameraIndex].label || 'Camera';
+        showToast('📷 ' + camLabel + ' đã sẵn sàng!', 'info');
+
+      } catch (err) {
+        console.error('Scanner error:', err);
+        showToast('Lỗi camera: ' + getErrorMessage(err), 'error');
+      }
+    }
+
+    function stopScan() {
+      const btnScan = document.getElementById('btn-scan');
+      const btnText = document.getElementById('btn-scan-text');
+      
+      if (scannerState.scanner && scannerState.isScanning) {
+        scannerState.scanner.stop().then(() => {
+          scannerState.scanner.clear();
+          scannerState.isScanning = false;
+          btnScan.classList.remove('scanning');
+          btnText.textContent = 'Bắt đầu Scan';
+          btnScan.querySelector('.material-icons-round').textContent = 'play_arrow';
+          document.getElementById('scan-overlay').style.display = 'none';
+        }).catch(err => console.error('Stop error:', err));
+      }
+    }
+
+    function onScanSuccess(decodedText, decodedResult) {
+      if (scannerState.scannedBarcodes.includes(decodedText)) return;
+
+      scannerState.scannedBarcodes.push(decodedText);
+      if (navigator.vibrate) navigator.vibrate(100);
+      playBeep();
+      
+      showToast('✅ Đã scan mã #' + scannerState.scannedBarcodes.length + ': ' + decodedText.substring(0, 30) + '...', 'success');
+      
+      if (scannerState.scannedBarcodes.length >= scannerState.maxBarcodes) {
+        setTimeout(() => {
+          stopScan();
+          displayResults(scannerState.scannedBarcodes);
+          showToast('🎉 Đã scan đủ 2 barcode!', 'success');
+        }, 500);
+      } else {
+        showToast('📸 Đã scan ' + scannerState.scannedBarcodes.length + '/' + scannerState.maxBarcodes + '. Tiếp tục...', 'info');
+      }
+    }
+
+    function onScanError(errorMessage) { /* ignore */ }
+
+    function switchCamera() {
+      if (scannerState.availableCameras.length <= 1) {
+        showToast('Thiết bị chỉ có 1 camera.', 'info');
+        return;
+      }
+      scannerState.currentCameraIndex = (scannerState.currentCameraIndex + 1) % scannerState.availableCameras.length;
+      scannerState.useFrontCamera = !scannerState.useFrontCamera;
+      if (scannerState.isScanning) {
+        stopScan();
+        setTimeout(() => startScan(), 500);
+      }
+      showToast('🔄 Chuyển camera', 'info');
+    }
+
+    // ===================== MODE SWITCH =====================
+    function switchMode(mode) {
+      scannerState.currentMode = mode;
+      document.getElementById('camera-mode').style.display = mode === 'camera' ? 'block' : 'none';
+      document.getElementById('manual-mode').style.display = mode === 'manual' ? 'block' : 'none';
+      document.getElementById('mode-camera').classList.toggle('active', mode === 'camera');
+      document.getElementById('mode-manual').classList.toggle('active', mode === 'manual');
+      if (mode === 'manual' && scannerState.isScanning) stopScan();
+    }
+
+    // ===================== MANUAL INPUT =====================
+    function processManualInput() {
+      const b1 = document.getElementById('manual-barcode1').value.trim();
+      const b2 = document.getElementById('manual-barcode2').value.trim();
+      if (!b1 && !b2) { showToast('⚠️ Vui lòng nhập ít nhất 1 barcode', 'error'); return; }
+      const barcodes = [];
+      if (b1) barcodes.push(b1);
+      if (b2) barcodes.push(b2);
+      scannerState.scannedBarcodes = barcodes;
+      displayResults(barcodes);
+      playBeep();
+    }
+
+    // ===================== DISPLAY RESULTS =====================
+    function displayResults(barcodes) {
+      const section = document.getElementById('results-section');
+      const container = document.getElementById('results-container');
+      section.style.display = 'block';
+      section.classList.add('scan-flash');
+      setTimeout(() => section.classList.remove('scan-flash'), 500);
+      document.getElementById('results-count').textContent = barcodes.length + ' mã';
+      
+      let html = '';
+      barcodes.forEach((barcode, i) => {
+        html += '<div class="barcode-result"><div class="barcode-label"><span class="dot" style="background:' + 
+          (i === 0 ? 'var(--primary-light)' : 'var(--success)') + '"></span> Barcode dòng ' + (i+1) + 
+          '</div><div class="barcode-value">' + escapeHtml(barcode) + '</div></div>';
+      });
+      container.innerHTML = html;
+      parseAndShowGS1(barcodes);
+      section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function parseAndShowGS1(barcodes) {
+      const gs1Container = document.getElementById('gs1-container');
+      const allData = {};
+      barcodes.forEach(barcode => {
+        const aiPattern = /\((\d{2,4})\)([^(]*)/g;
+        let match;
+        while ((match = aiPattern.exec(barcode)) !== null) {
+          allData[match[1]] = match[2].trim();
+        }
+      });
+      if (Object.keys(allData).length > 0) {
+        gs1Container.style.display = 'grid';
+        document.getElementById('gs1-batch').textContent = allData['10'] || '-';
+        document.getElementById('gs1-material').textContent = allData['240'] || '-';
+        document.getElementById('gs1-sscc').textContent = allData['00'] || '-';
+        document.getElementById('gs1-gtin').textContent = allData['01'] || '-';
+      } else {
+        gs1Container.style.display = 'none';
+      }
+    }
+
+    // ===================== SAVE TO SHEETS =====================
+    async function saveResults() {
+      const btnSave = document.getElementById('btn-save');
+      const note = document.getElementById('scan-note').value.trim();
+      
+      if (scannerState.scannedBarcodes.length === 0) {
+        showToast('⚠️ Chưa có barcode để lưu', 'error');
+        return;
+      }
+
+      if (GAS_WEB_APP_URL.includes('YOUR_DEPLOYMENT_ID')) {
+        showToast('⚠️ Chưa cấu hình GAS URL! Xem hướng dẫn.', 'error');
+        return;
+      }
+      
+      btnSave.disabled = true;
+      btnSave.innerHTML = '<div class="spinner"></div> Đang lưu...';
+      
+      const result = await postGasApi({
+        action: 'save',
+        barcodes: scannerState.scannedBarcodes,
+        note: note
+      });
+      
+      btnSave.disabled = false;
+      btnSave.innerHTML = '<span class="material-icons-round">save</span> Lưu vào Google Sheets';
+      
+      if (result.success) {
+        showToast('✅ ' + result.message, 'success');
+        scannerState.scannedBarcodes = [];
+        document.getElementById('scan-note').value = '';
+        document.getElementById('results-section').style.display = 'none';
+        refreshHistory();
+        refreshStats();
+      } else {
+        showToast('❌ ' + (result.error || 'Lỗi không xác định'), 'error');
+      }
+    }
+
+    // ===================== HISTORY =====================
+    async function refreshHistory() {
+      if (GAS_WEB_APP_URL.includes('YOUR_DEPLOYMENT_ID')) return;
+      const result = await callGasApi('history', { limit: 20 });
+      if (result.success) renderHistory(result.data);
+    }
+
+    function renderHistory(history) {
+      const list = document.getElementById('history-list');
+      if (!history || history.length === 0) {
+        list.innerHTML = '<div class="empty-state"><span class="material-icons-round">inbox</span><p>Chưa có lịch sử scan</p></div>';
+        return;
+      }
+      let html = '';
+      history.forEach(item => {
+        const displayBarcode = item.barcode1 || item.barcode2 || 'N/A';
+        const truncated = displayBarcode.length > 35 ? displayBarcode.substring(0, 35) + '...' : displayBarcode;
+        html += '<div class="history-item" onclick=\'showHistoryDetail(' + JSON.stringify(item).replace(/'/g, "\\'") + ')\'>' +
+          '<div class="history-num">' + item.stt + '</div>' +
+          '<div class="history-content"><div class="history-barcode">' + escapeHtml(truncated) + '</div>' +
+          '<div class="history-time">' + item.timestamp + '</div></div>' +
+          '<div class="history-status">' + item.status + '</div></div>';
+      });
+      list.innerHTML = html;
+    }
+
+    function showHistoryDetail(item) {
+      const barcodes = [];
+      if (item.barcode1) barcodes.push(item.barcode1);
+      if (item.barcode2) barcodes.push(item.barcode2);
+      displayResults(barcodes);
+    }
+
+    // ===================== STATS =====================
+    async function refreshStats() {
+      if (GAS_WEB_APP_URL.includes('YOUR_DEPLOYMENT_ID')) return;
+      const result = await callGasApi('stats');
+      if (result.success && result.data) {
+        document.getElementById('stat-total').textContent = result.data.total;
+        document.getElementById('stat-today').textContent = result.data.today;
+        document.getElementById('stat-week').textContent = result.data.thisWeek;
+      }
+    }
+
+    // ===================== UTILITIES =====================
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.appendChild(document.createTextNode(text));
+      return div.innerHTML;
+    }
+
+    function showToast(message, type) {
+      const toast = document.getElementById('toast');
+      const icon = document.getElementById('toast-icon');
+      const msg = document.getElementById('toast-msg');
+      toast.className = 'toast ' + type;
+      msg.textContent = message;
+      switch(type) {
+        case 'success': icon.textContent = 'check_circle'; break;
+        case 'error': icon.textContent = 'error'; break;
+        case 'info': icon.textContent = 'info'; break;
+      }
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 3500);
+    }
+
+    function playBeep() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = 1200; osc.type = 'sine'; gain.gain.value = 0.3;
+        osc.start();
+        setTimeout(() => { osc.stop(); ctx.close(); }, 150);
+      } catch(e) {}
+    }
+
+    // ===================== INIT =====================
+    window.addEventListener('DOMContentLoaded', function() {
+      initScanner();
+      
+      // Check if GAS URL is configured
+      if (GAS_WEB_APP_URL.includes('YOUR_DEPLOYMENT_ID')) {
+        document.getElementById('setup-banner').style.display = 'block';
+      } else {
+        refreshStats();
+        refreshHistory();
+      }
+    });
+  </script>
+</body>
+</html>
