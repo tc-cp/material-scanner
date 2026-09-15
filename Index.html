@@ -6,10 +6,11 @@
   <title>📱 Barcode & QR Scanner</title>
   <meta name="description" content="Scan Barcode và QR Code bằng camera, lưu tự động vào Google Sheets">
   
-  <!-- Html5-QRCode Library (fallback decoder) -->
+  <!-- Html5-QRCode Library (barcode decoder for SSCC) -->
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 
-  <!-- ZBar WASM loaded dynamically at scan time via import() -->
+  <!-- Tesseract.js v6 - OCR engine for reading Batch & Material text -->
+  <script src="https://unpkg.com/tesseract.js@v5.1.1/dist/tesseract.min.js"></script>
   
   <!-- Google Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -462,16 +463,38 @@
           </div>
         </div>
         <div class="scanner-controls">
-          <button class="btn btn-primary" id="btn-scan" onclick="toggleScan()">
+          <!-- OCR Capture button (primary - for Batch & Material) -->
+          <button class="btn btn-primary" id="btn-ocr" onclick="startOCRCapture()" style="background:linear-gradient(135deg,#667eea,#764ba2);">
+            <span class="material-icons-round">photo_camera</span>
+            <span id="btn-ocr-text">📸 Chụp & Đọc (OCR)</span>
+          </button>
+          <!-- Barcode Scan button (for SSCC) -->
+          <button class="btn btn-secondary" id="btn-scan" onclick="toggleScan()">
             <span class="material-icons-round">play_arrow</span>
-            <span id="btn-scan-text">Bắt đầu Scan</span>
+            <span id="btn-scan-text">Scan SSCC</span>
           </button>
           <button class="btn btn-secondary btn-icon-only" onclick="toggleTorch()" id="btn-torch" style="display:none;" title="Bật/tắt đèn flash">
             <span class="material-icons-round">flashlight_on</span>
           </button>
-          <button class="btn btn-secondary btn-icon-only" onclick="switchCamera()" id="btn-switch-cam" title="Chuyển camera">
-            <span class="material-icons-round">flip_camera_ios</span>
-          </button>
+        </div>
+        <!-- OCR Status -->
+        <div id="ocr-status" style="display:none;padding:12px;text-align:center;">
+          <div class="spinner" style="margin:0 auto 8px;"></div>
+          <div id="ocr-status-text" style="color:var(--text-secondary);font-size:13px;">Đang xử lý OCR...</div>
+        </div>
+        <!-- OCR Result Preview -->
+        <div id="ocr-preview" style="display:none;padding:12px;">
+          <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary);">📋 Kết quả OCR:</div>
+          <div id="ocr-result-batch" class="barcode-result" style="margin-bottom:6px;"></div>
+          <div id="ocr-result-material" class="barcode-result" style="margin-bottom:10px;"></div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-success" onclick="acceptOCRResult()" style="flex:1;">
+              <span class="material-icons-round">check</span> Chấp nhận
+            </button>
+            <button class="btn btn-secondary" onclick="retryOCR()" style="flex:1;">
+              <span class="material-icons-round">refresh</span> Chụp lại
+            </button>
+          </div>
         </div>
       </div>
 
@@ -567,7 +590,13 @@
       // ZBar parallel decoder state
       scanCanvas: null,
       scanCtx: null,
-      animFrameId: null
+      animFrameId: null,
+      // OCR state
+      ocrBatch: null,
+      ocrMaterial: null,
+      ocrWorker: null,
+      ocrStream: null,
+      ocrVideo: null
     };
 
 
@@ -771,6 +800,285 @@
       document.getElementById('scanner-container').style.minHeight = '250px';
     }
 
+    // ===================== OCR ENGINE (Tesseract.js) =====================
+    // Reads Batch & Material text from the shipping label photo.
+    // Flow: Open camera → Capture photo → Preprocess → OCR → Parse → Display
+    // =====================================================================
+
+    async function startOCRCapture() {
+      const btnOcr = document.getElementById('btn-ocr');
+      const btnOcrText = document.getElementById('btn-ocr-text');
+
+      // If camera already open for OCR, capture the frame
+      if (scannerState.ocrVideo && scannerState.ocrStream) {
+        await captureAndRunOCR();
+        return;
+      }
+
+      try {
+        // Stop any barcode scanning first
+        if (scannerState.isScanning) stopScan();
+
+        showToast('📷 Đang mở camera...', 'info');
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            focusMode: { ideal: 'continuous' }
+          },
+          audio: false
+        });
+
+        const container = document.getElementById('scanner-container');
+        container.innerHTML = '';
+        container.style.minHeight = '300px';
+
+        const video = document.createElement('video');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('autoplay', '');
+        video.setAttribute('muted', '');
+        video.muted = true;
+        video.style.width = '100%';
+        video.style.height = 'auto';
+        video.style.borderRadius = '12px';
+        video.srcObject = stream;
+        container.appendChild(video);
+
+        await video.play();
+
+        scannerState.ocrStream = stream;
+        scannerState.ocrVideo = video;
+
+        // Update button to "Capture" mode
+        btnOcrText.textContent = '📸 CHỤP ẢNH';
+        btnOcr.style.background = 'linear-gradient(135deg, #f093fb, #f5576c)';
+
+        showToast('Hướng camera vào nhãn, bấm CHỤP ẢNH', 'info');
+
+      } catch (err) {
+        console.error('Camera error:', err);
+        showToast('Lỗi camera: ' + getErrorMessage(err), 'error');
+      }
+    }
+
+    async function captureAndRunOCR() {
+      const video = scannerState.ocrVideo;
+      if (!video || video.readyState < 2) {
+        showToast('Camera chưa sẵn sàng', 'error');
+        return;
+      }
+
+      // Show processing status
+      document.getElementById('ocr-status').style.display = 'block';
+      document.getElementById('ocr-status-text').textContent = '📸 Đang chụp ảnh...';
+
+      // Capture high-quality frame
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0);
+
+      // Preprocessing: convert to grayscale + boost contrast for better OCR
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        // Grayscale
+        const gray = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+        // Contrast boost (stretch histogram)
+        const contrast = 1.5;
+        const adjusted = Math.min(255, Math.max(0, (gray - 128) * contrast + 128));
+        // Threshold for cleaner text
+        const final = adjusted > 140 ? 255 : 0;
+        data[i] = data[i+1] = data[i+2] = final;
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      // Stop camera stream (save battery)
+      stopOCRCamera();
+
+      // Show captured image
+      const container = document.getElementById('scanner-container');
+      const img = document.createElement('img');
+      img.src = canvas.toDataURL('image/png');
+      img.style.width = '100%';
+      img.style.borderRadius = '12px';
+      container.innerHTML = '';
+      container.appendChild(img);
+
+      // Run Tesseract.js OCR
+      document.getElementById('ocr-status-text').textContent = '🔍 Đang nhận diện chữ (OCR)...';
+
+      try {
+        const result = await Tesseract.recognize(canvas, 'eng', {
+          logger: m => {
+            if (m.status === 'recognizing text') {
+              const pct = Math.round((m.progress || 0) * 100);
+              document.getElementById('ocr-status-text').textContent = '🔍 OCR: ' + pct + '%';
+            }
+          }
+        });
+
+        const ocrText = result.data.text;
+        console.log('📝 OCR raw text:', ocrText);
+
+        // Parse the OCR text to extract Batch and Material
+        const parsed = parseShippingLabel(ocrText);
+
+        document.getElementById('ocr-status').style.display = 'none';
+
+        if (parsed.batch || parsed.material) {
+          // Show OCR results for user confirmation
+          showOCRResult(parsed);
+          playBeep();
+          if (navigator.vibrate) navigator.vibrate(100);
+        } else {
+          showToast('❌ Không nhận diện được Batch/Material. Thử chụp lại.', 'error');
+          resetOCRUI();
+        }
+
+      } catch (err) {
+        console.error('OCR error:', err);
+        document.getElementById('ocr-status').style.display = 'none';
+        showToast('❌ Lỗi OCR: ' + getErrorMessage(err), 'error');
+        resetOCRUI();
+      }
+    }
+
+    /**
+     * Parse shipping label OCR text to extract Batch and Material.
+     * Looks for labeled fields first, then falls back to pattern matching.
+     *
+     * Label format (from user's photo):
+     *   BATCH
+     *   6255VN1101
+     *   MATERIAL
+     *   P11242642
+     */
+    function parseShippingLabel(ocrText) {
+      const lines = ocrText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      let batch = null;
+      let material = null;
+
+      console.log('📋 OCR lines:', lines);
+
+      // Strategy 1: Look for "BATCH" label, then grab the next line
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].toUpperCase();
+
+        if (line.match(/BATCH/) && i + 1 < lines.length) {
+          const candidate = lines[i + 1].replace(/[^A-Za-z0-9]/g, '');
+          // Batch pattern: digits + letters + digits (e.g., 6255VN1101)
+          if (candidate.match(/^\d{2,}[A-Z]{2}\d{2,}$/i) || candidate.length >= 6) {
+            batch = candidate;
+          }
+        }
+
+        if (line.match(/MATERIAL/) && i + 1 < lines.length) {
+          const candidate = lines[i + 1].replace(/[^A-Za-z0-9]/g, '');
+          // Material pattern: P + digits (e.g., P11242642)
+          if (candidate.match(/^P?\d{5,}/i) || candidate.length >= 6) {
+            material = candidate;
+          }
+        }
+      }
+
+      // Strategy 2: Direct pattern matching on all lines
+      if (!batch || !material) {
+        for (const line of lines) {
+          const clean = line.replace(/[^A-Za-z0-9]/g, '');
+
+          // Batch: 4 digits + 2 letters + 4 digits (e.g., 6255VN1101, 6241VN1108)
+          if (!batch) {
+            const batchMatch = clean.match(/(\d{4}[A-Z]{2}\d{4})/i);
+            if (batchMatch) batch = batchMatch[1];
+          }
+
+          // Material: P followed by 8 digits (e.g., P11242642)
+          if (!material) {
+            const matMatch = clean.match(/(P\d{7,8})/i);
+            if (matMatch) material = matMatch[1];
+          }
+        }
+      }
+
+      // Strategy 3: Look for large standalone alphanumeric strings
+      if (!batch) {
+        for (const line of lines) {
+          const clean = line.replace(/[^A-Za-z0-9]/g, '');
+          if (clean.match(/^\d{4}[A-Z]{2}\d{3,5}$/i)) {
+            batch = clean;
+            break;
+          }
+        }
+      }
+
+      return { batch, material };
+    }
+
+    function showOCRResult(parsed) {
+      const preview = document.getElementById('ocr-preview');
+      const batchEl = document.getElementById('ocr-result-batch');
+      const matEl = document.getElementById('ocr-result-material');
+
+      batchEl.innerHTML = '<div class="barcode-label"><span class="dot" style="background:var(--primary-light);"></span> Batch</div>' +
+        '<div class="barcode-value" style="font-size:18px;font-weight:700;">' + escapeHtml(parsed.batch || '—') + '</div>';
+      matEl.innerHTML = '<div class="barcode-label"><span class="dot" style="background:var(--success);"></span> Material</div>' +
+        '<div class="barcode-value" style="font-size:18px;font-weight:700;">' + escapeHtml(parsed.material || '—') + '</div>';
+
+      preview.style.display = 'block';
+      scannerState.ocrBatch = parsed.batch;
+      scannerState.ocrMaterial = parsed.material;
+
+      showToast('✅ OCR: Batch=' + (parsed.batch || '?') + ', Material=' + (parsed.material || '?'), 'success');
+    }
+
+    function acceptOCRResult() {
+      // Build barcode 1 from OCR results (simulate GS1 format for backend)
+      const batch = scannerState.ocrBatch || '';
+      const material = scannerState.ocrMaterial || '';
+      const barcode1 = '(10)' + batch + '(240)' + material;
+
+      scannerState.scannedBarcodes = [barcode1];
+
+      document.getElementById('ocr-preview').style.display = 'none';
+
+      // Update progress dots
+      updateScanProgress();
+      showToast('✅ Batch & Material đã ghi nhận. Giờ scan barcode SSCC!', 'info');
+
+      // Auto-start barcode scan for SSCC
+      setTimeout(() => {
+        startScan();
+      }, 500);
+    }
+
+    function retryOCR() {
+      document.getElementById('ocr-preview').style.display = 'none';
+      scannerState.ocrBatch = null;
+      scannerState.ocrMaterial = null;
+      resetOCRUI();
+      startOCRCapture();
+    }
+
+    function stopOCRCamera() {
+      if (scannerState.ocrStream) {
+        scannerState.ocrStream.getTracks().forEach(t => t.stop());
+        scannerState.ocrStream = null;
+      }
+      scannerState.ocrVideo = null;
+    }
+
+    function resetOCRUI() {
+      const btnOcr = document.getElementById('btn-ocr');
+      const btnOcrText = document.getElementById('btn-ocr-text');
+      btnOcrText.textContent = '📸 Chụp & Đọc (OCR)';
+      btnOcr.style.background = 'linear-gradient(135deg, #667eea, #764ba2)';
+      document.getElementById('ocr-status').style.display = 'none';
+    }
+
     function getErrorMessage(err) {
       if (typeof err === 'string') return err;
       if (err && err.message) return err.message;
@@ -782,71 +1090,15 @@
       else { startScan(); }
     }
 
-    // ==================== ZBAR PARALLEL DECODER ====================
-    // Runs alongside html5-qrcode, reading frames from the same video
-    // element that html5-qrcode creates. ZBar is much better at
-    // decoding complex GS1-128 barcodes.
-    // ==============================================================
-
-    function startZbarParallelDecoder() {
-      // Find the video element created by html5-qrcode
-      const video = document.querySelector('#scanner-container video');
-      if (!video || !window.zbarScanImageData) {
-        console.log('ZBar parallel decoder: no video or ZBar not loaded');
-        return;
-      }
-
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      scannerState.scanCanvas = canvas;
-      scannerState.scanCtx = ctx;
-
-      let lastDecodeTime = 0;
-      const INTERVAL = 150; // Decode every 150ms
-
-      async function decodeFrame(timestamp) {
-        if (!scannerState.isScanning) return;
-
-        if (timestamp - lastDecodeTime >= INTERVAL && video.readyState >= 2) {
-          lastDecodeTime = timestamp;
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0);
-
-          try {
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const symbols = await window.zbarScanImageData(imageData);
-            for (const sym of symbols) {
-              const raw = sym.decode();
-              if (raw) {
-                console.log('🔍 ZBar decoded:', raw);
-                onScanSuccess(raw, { result: { format: 'CODE_128 (ZBar)' } });
-              }
-            }
-          } catch (e) { /* ignore frame errors */ }
-        }
-        scannerState.animFrameId = requestAnimationFrame(decodeFrame);
-      }
-
-      console.log('🟢 ZBar parallel decoder started');
-      scannerState.animFrameId = requestAnimationFrame(decodeFrame);
-    }
-
-    function stopZbarParallelDecoder() {
-      if (scannerState.animFrameId) {
-        cancelAnimationFrame(scannerState.animFrameId);
-        scannerState.animFrameId = null;
-      }
-      scannerState.scanCanvas = null;
-      scannerState.scanCtx = null;
-    }
-
-    // ==================== MAIN SCANNER (html5-qrcode) ====================
+    // ==================== MAIN BARCODE SCANNER (html5-qrcode, for SSCC) ====================
 
     async function startScan() {
-      scannerState.scannedBarcodes = [];
+      // Don't reset scannedBarcodes — OCR may have already added barcode 1
       scannerState.torchOn = false;
       scannerState.lastScanTime = 0;
+
+      // Stop OCR camera if still open
+      stopOCRCamera();
 
       const btnScan = document.getElementById('btn-scan');
       const btnText = document.getElementById('btn-scan-text');
@@ -874,13 +1126,11 @@
           scannerState.currentCameraIndex = cameras.length - 1;
         }
 
-        // Create scanner with Code 128 + QR support
+        // Create scanner — only Code 128 needed for SSCC barcode
         scannerState.scanner = new Html5Qrcode("scanner-container", {
           formatsToSupport: [
             Html5QrcodeSupportedFormats.CODE_128,
-            Html5QrcodeSupportedFormats.QR_CODE,
-            Html5QrcodeSupportedFormats.EAN_13,
-            Html5QrcodeSupportedFormats.EAN_8
+            Html5QrcodeSupportedFormats.QR_CODE
           ],
           experimentalFeatures: { useBarCodeDetectorIfSupported: true },
           verbose: false
@@ -893,7 +1143,7 @@
             qrbox: function(w, h) {
               return {
                 width: Math.min(Math.floor(w * 0.9), 600),
-                height: Math.max(Math.min(Math.floor(h * 0.35), 200), 60)
+                height: Math.max(Math.min(Math.floor(h * 0.25), 150), 50)
               };
             },
             aspectRatio: 1.7778,
@@ -911,26 +1161,12 @@
 
         scannerState.isScanning = true;
         btnScan.classList.add('scanning');
-        btnText.textContent = 'Đang scan... (Dừng)';
+        btnText.textContent = 'Đang scan SSCC... (Dừng)';
         btnScan.querySelector('.material-icons-round').textContent = 'stop';
         document.getElementById('scan-overlay').style.display = 'block';
         updateScanProgress();
         setTimeout(checkTorchSupport, 500);
-
-        // Start ZBar parallel decoder for extra GS1-128 power
-        ensureZbarLoaded().then(ok => {
-          if (ok && scannerState.isScanning) {
-            // Wait a bit for html5-qrcode video element to be ready
-            setTimeout(() => {
-              if (scannerState.isScanning) {
-                startZbarParallelDecoder();
-                showToast('📷 Scanner + ZBar WASM — Hướng vào barcode', 'info');
-              }
-            }, 1000);
-          } else {
-            showToast('📷 Scanner đang hoạt động — Hướng vào barcode', 'info');
-          }
-        });
+        showToast('📷 Hướng camera vào barcode SSCC (dòng dưới)', 'info');
 
       } catch (err) {
         console.error('Scanner error:', err);
@@ -942,9 +1178,6 @@
       const btnScan = document.getElementById('btn-scan');
       const btnText = document.getElementById('btn-scan-text');
 
-      // Stop ZBar parallel decoder
-      stopZbarParallelDecoder();
-
       // Stop html5-qrcode
       if (scannerState.scanner && scannerState.isScanning) {
         scannerState.scanner.stop().then(() => {
@@ -955,7 +1188,7 @@
       scannerState.isScanning = false;
       scannerState.torchOn = false;
       btnScan.classList.remove('scanning');
-      btnText.textContent = 'Bắt đầu Scan';
+      btnText.textContent = 'Scan SSCC';
       btnScan.querySelector('.material-icons-round').textContent = 'play_arrow';
       document.getElementById('scan-overlay').style.display = 'none';
       document.getElementById('scan-progress').style.display = 'none';
@@ -1042,15 +1275,13 @@
 
       progressEl.style.display = 'flex';
 
-      // Update dot states
       dot1.className = 'dot' + (count >= 1 ? ' scanned' : (count === 0 ? ' active' : ''));
       dot2.className = 'dot' + (count >= 2 ? ' scanned' : (count === 1 ? ' active' : ''));
 
-      // Update status text
       if (count === 0) {
-        textEl.textContent = 'Hướng camera vào barcode 1...';
+        textEl.textContent = 'Bước 1: Chụp ảnh nhãn để đọc Batch & Material';
       } else if (count === 1) {
-        textEl.textContent = '1/2 ✓ Tiếp tục scan barcode 2...';
+        textEl.textContent = '1/2 ✓ Bước 2: Scan barcode SSCC (dòng dưới)...';
       } else {
         textEl.textContent = '2/2 ✓ Hoàn tất!';
       }
@@ -1324,4 +1555,3 @@
   </script>
 </body>
 </html>
-
