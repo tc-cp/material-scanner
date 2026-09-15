@@ -6,8 +6,14 @@
   <title>📱 Barcode & QR Scanner</title>
   <meta name="description" content="Scan Barcode và QR Code bằng camera, lưu tự động vào Google Sheets">
   
-  <!-- Html5-QRCode Library -->
+  <!-- Html5-QRCode Library (fallback decoder) -->
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <!-- ZBar WASM - WebAssembly barcode decoder (primary, much faster/better for GS1-128) -->
+  <script type="module">
+    import { scanImageData } from 'https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.11.0/dist/index.js';
+    window.zbarScanImageData = scanImageData;
+  </script>
   
   <!-- Google Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -562,11 +568,15 @@
       torchOn: false,
       lastScanTime: 0,
       scanCooldownMs: 1500,
-      // Native BarcodeDetector engine state
-      videoStream: null,            // MediaStream from getUserMedia
-      videoElement: null,           // <video> element
-      nativeDetector: null,         // BarcodeDetector instance
-      detectInterval: null          // setInterval ID for detection loop
+      // Native/ZBar engine state
+      videoStream: null,
+      videoElement: null,
+      nativeDetector: null,
+      detectInterval: null,
+      // ZBar WASM engine state
+      scanCanvas: null,             // Offscreen canvas for frame capture
+      scanCtx: null,                // Canvas 2D context
+      animFrameId: null             // requestAnimationFrame ID
     };
 
     // ===================== GS1 RAW DATA NORMALIZER =====================
@@ -727,19 +737,23 @@
     }
 
     // ===================== SCANNER ENGINE =====================
-    // Dual-engine approach:
-    //   Primary:  Native BarcodeDetector API (GPU-accelerated, much faster)
-    //   Fallback: html5-qrcode library (for Safari/Firefox without BarcodeDetector)
+    // Triple-engine approach (in order of priority):
+    //   1. ZBar WASM — WebAssembly decoder, best at reading Code 128/GS1-128
+    //   2. Native BarcodeDetector API — GPU-accelerated, good fallback
+    //   3. html5-qrcode library — last resort for Safari/Firefox
     // ==========================================================
 
+    const hasZbarWasm = (typeof window.zbarScanImageData === 'function');
     const hasNativeBarcodeDetector = ('BarcodeDetector' in window);
 
     function initScanner() {
       document.getElementById('scanner-container').style.minHeight = '250px';
-      if (hasNativeBarcodeDetector) {
-        console.log('✅ Native BarcodeDetector API available — using GPU-accelerated engine');
+      if (hasZbarWasm) {
+        console.log('✅ ZBar WASM available — using WebAssembly decoder (best for GS1-128)');
+      } else if (hasNativeBarcodeDetector) {
+        console.log('⚠️ ZBar not loaded, using native BarcodeDetector API');
       } else {
-        console.log('⚠️ BarcodeDetector not available — falling back to html5-qrcode');
+        console.log('⚠️ Falling back to html5-qrcode');
       }
     }
 
@@ -754,15 +768,18 @@
       else { startScan(); }
     }
 
-    // ==================== NATIVE BARCODE DETECTOR ENGINE ====================
+    // ==================== ZBAR WASM ENGINE (PRIMARY) ====================
+    // ZBar is a proven C library compiled to WebAssembly — it decodes
+    // Code 128 (and thus GS1-128) with much higher reliability than
+    // both zxing-js and native BarcodeDetector, especially for long,
+    // concatenated barcodes like (10)6255VN1101(240)P11242642.
+    // ===================================================================
 
-    async function startScanNative() {
+    async function startScanZbar() {
       const btnScan = document.getElementById('btn-scan');
       const btnText = document.getElementById('btn-scan-text');
 
       try {
-        // Request HIGH RESOLUTION camera with continuous autofocus
-        // Higher resolution = much better detection of long GS1-128 barcodes
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
@@ -774,7 +791,106 @@
           audio: false
         });
 
-        // Create video element inside scanner container
+        const container = document.getElementById('scanner-container');
+        container.innerHTML = '';
+
+        const video = document.createElement('video');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('autoplay', '');
+        video.setAttribute('muted', '');
+        video.style.width = '100%';
+        video.style.height = 'auto';
+        video.style.objectFit = 'cover';
+        video.srcObject = stream;
+        container.appendChild(video);
+
+        await video.play();
+
+        scannerState.videoStream = stream;
+        scannerState.videoElement = video;
+
+        // Create offscreen canvas for frame capture
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        scannerState.scanCanvas = canvas;
+        scannerState.scanCtx = ctx;
+
+        // ZBar decode loop using requestAnimationFrame
+        let lastDecodeTime = 0;
+        const DECODE_INTERVAL = 100; // Decode every 100ms (~10 FPS decode)
+
+        async function decodeLoop(timestamp) {
+          if (!scannerState.isScanning) return;
+
+          if (timestamp - lastDecodeTime >= DECODE_INTERVAL && video.readyState >= 2) {
+            lastDecodeTime = timestamp;
+
+            // Capture frame from video to canvas
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+
+            try {
+              const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const symbols = await window.zbarScanImageData(imageData);
+
+              for (const sym of symbols) {
+                const rawValue = sym.decode();
+                if (rawValue) {
+                  onScanSuccess(rawValue, { result: { format: sym.typeName } });
+                }
+              }
+            } catch (e) {
+              // Silently ignore frame decode errors
+            }
+          }
+
+          scannerState.animFrameId = requestAnimationFrame(decodeLoop);
+        }
+
+        scannerState.animFrameId = requestAnimationFrame(decodeLoop);
+
+        scannerState.isScanning = true;
+        btnScan.classList.add('scanning');
+        btnText.textContent = 'Đang scan... (Dừng)';
+        btnScan.querySelector('.material-icons-round').textContent = 'stop';
+        document.getElementById('scan-overlay').style.display = 'block';
+        updateScanProgress();
+        setTimeout(checkTorchSupport, 500);
+        showToast('📷 ZBar WASM scanner — Hướng vào barcode', 'info');
+
+      } catch (err) {
+        console.error('ZBar scanner error:', err);
+        showToast('Lỗi camera: ' + getErrorMessage(err), 'error');
+      }
+    }
+
+    function stopScanZbar() {
+      if (scannerState.animFrameId) {
+        cancelAnimationFrame(scannerState.animFrameId);
+        scannerState.animFrameId = null;
+      }
+      stopVideoStream();
+    }
+
+    // ==================== NATIVE BARCODE DETECTOR ENGINE (SECONDARY) ====================
+
+    async function startScanNative() {
+      const btnScan = document.getElementById('btn-scan');
+      const btnText = document.getElementById('btn-scan-text');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            focusMode: { ideal: 'continuous' },
+            frameRate: { ideal: 30 }
+          },
+          audio: false
+        });
+
         const container = document.getElementById('scanner-container');
         container.innerHTML = '';
         const video = document.createElement('video');
@@ -792,16 +908,11 @@
         scannerState.videoStream = stream;
         scannerState.videoElement = video;
 
-        // Create native BarcodeDetector — only Code 128 for fastest performance
-        const detector = new BarcodeDetector({
-          formats: ['code_128', 'qr_code']
-        });
+        const detector = new BarcodeDetector({ formats: ['code_128', 'qr_code'] });
         scannerState.nativeDetector = detector;
 
-        // Start detection loop — scan every 80ms (~12 FPS decode, plenty fast)
         scannerState.detectInterval = setInterval(async () => {
           if (!scannerState.isScanning || video.readyState < 2) return;
-
           try {
             const barcodes = await detector.detect(video);
             for (const barcode of barcodes) {
@@ -809,10 +920,8 @@
                 onScanSuccess(barcode.rawValue, { result: { format: barcode.format } });
               }
             }
-          } catch (e) {
-            // Silently ignore frame detection errors
-          }
-        }, 80);
+          } catch (e) { /* ignore */ }
+        }, 100);
 
         scannerState.isScanning = true;
         btnScan.classList.add('scanning');
@@ -830,13 +939,19 @@
     }
 
     function stopScanNative() {
-      const btnScan = document.getElementById('btn-scan');
-      const btnText = document.getElementById('btn-scan-text');
-
       if (scannerState.detectInterval) {
         clearInterval(scannerState.detectInterval);
         scannerState.detectInterval = null;
       }
+      stopVideoStream();
+    }
+
+    // ==================== SHARED VIDEO CLEANUP ====================
+
+    function stopVideoStream() {
+      const btnScan = document.getElementById('btn-scan');
+      const btnText = document.getElementById('btn-scan-text');
+
       if (scannerState.videoStream) {
         scannerState.videoStream.getTracks().forEach(t => t.stop());
         scannerState.videoStream = null;
@@ -846,6 +961,8 @@
         scannerState.videoElement = null;
       }
       scannerState.nativeDetector = null;
+      scannerState.scanCanvas = null;
+      scannerState.scanCtx = null;
       scannerState.isScanning = false;
       scannerState.torchOn = false;
       btnScan.classList.remove('scanning');
@@ -954,7 +1071,10 @@
         return;
       }
 
-      if (hasNativeBarcodeDetector) {
+      // Priority: ZBar WASM > Native BarcodeDetector > html5-qrcode
+      if (hasZbarWasm) {
+        await startScanZbar();
+      } else if (hasNativeBarcodeDetector) {
         await startScanNative();
       } else {
         await startScanFallback();
@@ -962,7 +1082,9 @@
     }
 
     function stopScan() {
-      if (hasNativeBarcodeDetector) {
+      if (hasZbarWasm) {
+        stopScanZbar();
+      } else if (hasNativeBarcodeDetector) {
         stopScanNative();
       } else {
         stopScanFallback();
@@ -1330,4 +1452,3 @@
   </script>
 </body>
 </html>
-
