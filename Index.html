@@ -552,7 +552,7 @@
     // ===================== STATE =====================
     const scannerState = {
       isScanning: false,
-      scanner: null,
+      scanner: null,                // html5-qrcode instance (fallback)
       scannedBarcodes: [],
       currentMode: 'camera',
       useFrontCamera: false,
@@ -560,8 +560,13 @@
       availableCameras: [],
       currentCameraIndex: 0,
       torchOn: false,
-      lastScanTime: 0,          // Timestamp of last successful scan
-      scanCooldownMs: 1500      // 1.5s cooldown to prevent duplicate reads
+      lastScanTime: 0,
+      scanCooldownMs: 1500,
+      // Native BarcodeDetector engine state
+      videoStream: null,            // MediaStream from getUserMedia
+      videoElement: null,           // <video> element
+      nativeDetector: null,         // BarcodeDetector instance
+      detectInterval: null          // setInterval ID for detection loop
     };
 
     // ===================== GS1 RAW DATA NORMALIZER =====================
@@ -721,10 +726,21 @@
       }
     }
 
-    // ===================== SCANNER =====================
+    // ===================== SCANNER ENGINE =====================
+    // Dual-engine approach:
+    //   Primary:  Native BarcodeDetector API (GPU-accelerated, much faster)
+    //   Fallback: html5-qrcode library (for Safari/Firefox without BarcodeDetector)
+    // ==========================================================
+
+    const hasNativeBarcodeDetector = ('BarcodeDetector' in window);
 
     function initScanner() {
       document.getElementById('scanner-container').style.minHeight = '250px';
+      if (hasNativeBarcodeDetector) {
+        console.log('✅ Native BarcodeDetector API available — using GPU-accelerated engine');
+      } else {
+        console.log('⚠️ BarcodeDetector not available — falling back to html5-qrcode');
+      }
     }
 
     function getErrorMessage(err) {
@@ -738,101 +754,157 @@
       else { startScan(); }
     }
 
-    async function startScan() {
+    // ==================== NATIVE BARCODE DETECTOR ENGINE ====================
+
+    async function startScanNative() {
       const btnScan = document.getElementById('btn-scan');
       const btnText = document.getElementById('btn-scan-text');
 
-      scannerState.scannedBarcodes = [];
-      scannerState.torchOn = false;
+      try {
+        // Request HIGH RESOLUTION camera with continuous autofocus
+        // Higher resolution = much better detection of long GS1-128 barcodes
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            focusMode: { ideal: 'continuous' },
+            frameRate: { ideal: 30 }
+          },
+          audio: false
+        });
 
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        showToast('Trình duyệt không hỗ trợ camera.', 'error');
-        return;
+        // Create video element inside scanner container
+        const container = document.getElementById('scanner-container');
+        container.innerHTML = '';
+        const video = document.createElement('video');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('autoplay', '');
+        video.setAttribute('muted', '');
+        video.style.width = '100%';
+        video.style.height = 'auto';
+        video.style.objectFit = 'cover';
+        video.srcObject = stream;
+        container.appendChild(video);
+
+        await video.play();
+
+        scannerState.videoStream = stream;
+        scannerState.videoElement = video;
+
+        // Create native BarcodeDetector — only Code 128 for fastest performance
+        const detector = new BarcodeDetector({
+          formats: ['code_128', 'qr_code']
+        });
+        scannerState.nativeDetector = detector;
+
+        // Start detection loop — scan every 80ms (~12 FPS decode, plenty fast)
+        scannerState.detectInterval = setInterval(async () => {
+          if (!scannerState.isScanning || video.readyState < 2) return;
+
+          try {
+            const barcodes = await detector.detect(video);
+            for (const barcode of barcodes) {
+              if (barcode.rawValue) {
+                onScanSuccess(barcode.rawValue, { result: { format: barcode.format } });
+              }
+            }
+          } catch (e) {
+            // Silently ignore frame detection errors
+          }
+        }, 80);
+
+        scannerState.isScanning = true;
+        btnScan.classList.add('scanning');
+        btnText.textContent = 'Đang scan... (Dừng)';
+        btnScan.querySelector('.material-icons-round').textContent = 'stop';
+        document.getElementById('scan-overlay').style.display = 'block';
+        updateScanProgress();
+        setTimeout(checkTorchSupport, 500);
+        showToast('📷 Native scanner (GPU) — Hướng vào barcode', 'info');
+
+      } catch (err) {
+        console.error('Native scanner error:', err);
+        showToast('Lỗi camera: ' + getErrorMessage(err), 'error');
       }
+    }
+
+    function stopScanNative() {
+      const btnScan = document.getElementById('btn-scan');
+      const btnText = document.getElementById('btn-scan-text');
+
+      if (scannerState.detectInterval) {
+        clearInterval(scannerState.detectInterval);
+        scannerState.detectInterval = null;
+      }
+      if (scannerState.videoStream) {
+        scannerState.videoStream.getTracks().forEach(t => t.stop());
+        scannerState.videoStream = null;
+      }
+      if (scannerState.videoElement) {
+        scannerState.videoElement.srcObject = null;
+        scannerState.videoElement = null;
+      }
+      scannerState.nativeDetector = null;
+      scannerState.isScanning = false;
+      scannerState.torchOn = false;
+      btnScan.classList.remove('scanning');
+      btnText.textContent = 'Bắt đầu Scan';
+      btnScan.querySelector('.material-icons-round').textContent = 'play_arrow';
+      document.getElementById('scan-overlay').style.display = 'none';
+      document.getElementById('scan-progress').style.display = 'none';
+      document.getElementById('btn-torch').style.display = 'none';
+      document.getElementById('btn-torch').classList.remove('torch-on');
+    }
+
+    // ==================== HTML5-QRCODE FALLBACK ENGINE ====================
+
+    async function startScanFallback() {
+      const btnScan = document.getElementById('btn-scan');
+      const btnText = document.getElementById('btn-scan-text');
 
       try {
-        // Enumerate cameras
         let cameras = scannerState.availableCameras;
         if (cameras.length === 0) {
           cameras = await Html5Qrcode.getCameras();
           scannerState.availableCameras = cameras;
         }
-
         if (!cameras || cameras.length === 0) {
           showToast('Không tìm thấy camera nào.', 'error');
           return;
         }
 
-        // Select camera - prefer rear/environment camera
         let selectedCameraId;
-        if (scannerState.useFrontCamera) {
-          selectedCameraId = cameras[0].id;
-          scannerState.currentCameraIndex = 0;
+        const backCam = cameras.find(c => (c.label||'').toLowerCase().match(/back|rear|environment/));
+        if (backCam) {
+          selectedCameraId = backCam.id;
+          scannerState.currentCameraIndex = cameras.indexOf(backCam);
         } else {
-          const backCam = cameras.find(c => (c.label||'').toLowerCase().match(/back|rear|environment/));
-          if (backCam) {
-            selectedCameraId = backCam.id;
-            scannerState.currentCameraIndex = cameras.indexOf(backCam);
-          } else {
-            selectedCameraId = cameras[cameras.length - 1].id;
-            scannerState.currentCameraIndex = cameras.length - 1;
-          }
+          selectedCameraId = cameras[cameras.length - 1].id;
+          scannerState.currentCameraIndex = cameras.length - 1;
         }
 
-        // ============================================================
-        // FIX #1 (CRITICAL): formatsToSupport in CONSTRUCTOR config
-        //
-        // BEFORE: formatsToSupport was in start() config -> IGNORED!
-        //         Library was trying ALL ~17 formats per frame.
-        //
-        // AFTER:  formatsToSupport in constructor + only 2 formats
-        //         -> ~8-10x fewer decode operations per frame
-        //
-        // FIX #2: Enable native BarcodeDetector API
-        //         Chrome/Edge/Android use GPU-accelerated native decoder
-        //         -> ~2-3x faster than JavaScript-only ZXing decoder
-        // ============================================================
-        const constructorConfig = {
+        scannerState.scanner = new Html5Qrcode("scanner-container", {
           formatsToSupport: [
-            Html5QrcodeSupportedFormats.CODE_128,  // GS1-128 barcode (primary use case)
-            Html5QrcodeSupportedFormats.QR_CODE     // QR code support (secondary)
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.QR_CODE
           ],
-          experimentalFeatures: {
-            useBarCodeDetectorIfSupported: true     // Use native BarcodeDetector API when available
-          },
+          experimentalFeatures: { useBarCodeDetectorIfSupported: true },
           verbose: false
-        };
-
-        scannerState.scanner = new Html5Qrcode("scanner-container", constructorConfig);
-
-        // ============================================================
-        // FIX #3: Optimized scan config for 1D barcode scanning
-        //
-        // - fps: 10 -> 15 (50% more decode attempts per second)
-        // - qrbox: Dynamic function adapts to viewport size
-        //          Wide (90%) + Short (30%) = optimal for long GS1-128
-        // - aspectRatio: 16:9 for wider field of view
-        // - disableFlip: true (rear camera doesn't need mirror)
-        // ============================================================
-        const scanConfig = {
-          fps: 20,                    // High FPS for faster detection of long barcodes
-          qrbox: function(viewfinderWidth, viewfinderHeight) {
-            // VERY WIDE + SHORT: optimized for long GS1-128 barcodes like
-            // (10)6255VN1101(240)P11242642 which are physically long
-            return {
-              width: Math.min(Math.floor(viewfinderWidth * 0.95), 700),
-              height: Math.max(Math.min(Math.floor(viewfinderHeight * 0.2), 120), 50)
-            };
-          },
-          aspectRatio: 1.7778,
-          disableFlip: true
-        };
+        });
 
         await scannerState.scanner.start(
           selectedCameraId,
-          scanConfig,
+          {
+            fps: 20,
+            qrbox: function(w, h) {
+              return { width: Math.min(Math.floor(w * 0.95), 700), height: Math.max(Math.min(Math.floor(h * 0.2), 120), 50) };
+            },
+            aspectRatio: 1.7778,
+            disableFlip: true
+          },
           onScanSuccess,
-          onScanError
+          function() {}
         );
 
         scannerState.isScanning = true;
@@ -840,23 +912,17 @@
         btnText.textContent = 'Đang scan... (Dừng)';
         btnScan.querySelector('.material-icons-round').textContent = 'stop';
         document.getElementById('scan-overlay').style.display = 'block';
-
-        // Show scan progress indicator
         updateScanProgress();
-
-        // Check torch (flash) support after camera starts
         setTimeout(checkTorchSupport, 500);
-
-        const camLabel = cameras[scannerState.currentCameraIndex].label || 'Camera';
-        showToast('📷 ' + camLabel + ' đã sẵn sàng! Hướng vào barcode.', 'info');
+        showToast('📷 Fallback scanner — Hướng vào barcode', 'info');
 
       } catch (err) {
-        console.error('Scanner error:', err);
+        console.error('Fallback scanner error:', err);
         showToast('Lỗi camera: ' + getErrorMessage(err), 'error');
       }
     }
 
-    function stopScan() {
+    function stopScanFallback() {
       const btnScan = document.getElementById('btn-scan');
       const btnText = document.getElementById('btn-scan-text');
 
@@ -875,6 +941,35 @@
         }).catch(err => console.error('Stop error:', err));
       }
     }
+
+    // ==================== UNIFIED START/STOP ====================
+
+    async function startScan() {
+      scannerState.scannedBarcodes = [];
+      scannerState.torchOn = false;
+      scannerState.lastScanTime = 0;
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showToast('Trình duyệt không hỗ trợ camera.', 'error');
+        return;
+      }
+
+      if (hasNativeBarcodeDetector) {
+        await startScanNative();
+      } else {
+        await startScanFallback();
+      }
+    }
+
+    function stopScan() {
+      if (hasNativeBarcodeDetector) {
+        stopScanNative();
+      } else {
+        stopScanFallback();
+      }
+    }
+
+    // ==================== SCAN CALLBACKS ====================
 
     /**
      * Strip invisible characters, whitespace, and normalize for comparison.
@@ -896,9 +991,7 @@
       var cleanNew = cleanForCompare(newText);
       for (var i = 0; i < existingBarcodes.length; i++) {
         var cleanExisting = cleanForCompare(existingBarcodes[i]);
-        // Exact match after normalization
         if (cleanNew === cleanExisting) return true;
-        // Substring containment (one contains the other)
         if (cleanNew.length > 5 && cleanExisting.length > 5) {
           if (cleanNew.indexOf(cleanExisting) !== -1 || cleanExisting.indexOf(cleanNew) !== -1) return true;
         }
@@ -907,19 +1000,16 @@
     }
 
     function onScanSuccess(decodedText, decodedResult) {
-      // ============================================================
-      // ANTI-DUPLICATE: Cooldown timer prevents same barcode being
-      // read twice in quick succession (common with high FPS scanning)
-      // ============================================================
+      // Anti-duplicate cooldown
       var now = Date.now();
       if (now - scannerState.lastScanTime < scannerState.scanCooldownMs) {
-        return; // Too soon after last scan, ignore
+        return;
       }
 
       // Normalize raw GS1 data if applicable
       const normalizedText = normalizeGS1Barcode(decodedText);
 
-      // Fuzzy duplicate check (handles whitespace, invisible chars, substrings)
+      // Fuzzy duplicate check
       if (isDuplicate(normalizedText, scannerState.scannedBarcodes) ||
           isDuplicate(decodedText, scannerState.scannedBarcodes)) {
         return;
@@ -930,8 +1020,6 @@
       scannerState.lastScanTime = now;
       if (navigator.vibrate) navigator.vibrate(100);
       playBeep();
-
-      // Update progress indicator
       updateScanProgress();
 
       const displayText = normalizedText.length > 30 ? normalizedText.substring(0, 30) + '...' : normalizedText;
@@ -1242,3 +1330,4 @@
   </script>
 </body>
 </html>
+
